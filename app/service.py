@@ -1,3 +1,4 @@
+from itertools import product
 from typing import TypedDict
 
 import chromadb
@@ -5,6 +6,7 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer, util
+from sklearn.linear_model import LinearRegression
 
 
 class SearchResult(TypedDict):
@@ -107,6 +109,52 @@ class Service:
 
         return token_importance
 
+    def lime(
+        self,
+        document_tokens: list[list[str]],
+        document_token_embeddings: list[torch.Tensor],
+        document_embeddings: NDArray[np.float32],
+        query_tokens: list[str],
+        query_token_embeddings: torch.Tensor,
+        query_embedding: NDArray[np.float32],
+    ):
+
+        assert (
+            len(document_tokens)
+            == len(document_token_embeddings)
+            == len(document_token_embeddings)
+        )
+
+        lime_results = list()
+        for doc_tokens, doc_tok_emb, doc_embs in zip(
+            document_tokens, document_token_embeddings, document_token_embeddings
+        ):
+
+            # Document -> Query
+            X, y = [], []
+
+            tokens_core = doc_tokens[1:-1]  # remove CLS/SEP
+            n_tokens = doc_tok_emb.size(0)
+            n_core = len(tokens_core)
+
+            # creating all binary (with or without token - 2^tokens) subsets (used as attenion mask for masking)
+            for bits in product([0, 1], repeat=n_core):
+                mask = torch.ones(n_tokens)  # Init Attention Mask
+                mask[1:-1] = torch.tensor(bits)  # Mask Tokens
+
+                emb_subset = mean_pooling(
+                    doc_tok_emb, mask
+                )  # Masked Document Embedding
+                sim = util.cos_sim(emb_subset, query_embedding)
+
+                X.append(mask.cpu().numpy())
+                y.append(sim.squeeze().item())
+
+            reg = LinearRegression().fit(X, y)
+            coefs = reg.coef_
+
+            # Query -> Doc
+
     def _unpack_search_results(self, search_results) -> list[SearchResult]:
         combined = list()
         combined = [
@@ -189,6 +237,15 @@ class Service:
             query_token_embeddings,
             q_emb,
             full_similarities,
+        )
+
+        lime_res = self.lime(
+            document_tokens,
+            document_token_embeddings,
+            doc_embeds,
+            query_tokens,
+            query_token_embeddings,
+            q_emb,
         )
 
         return token_importance
