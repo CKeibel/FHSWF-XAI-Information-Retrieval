@@ -10,6 +10,18 @@ class SearchResult(TypedDict):
     score: float
 
 
+class TokenImportance(TypedDict):
+    document: dict[str, float]
+    query: dict[str, float]
+
+
+def mean_pooling(
+    token_embeddings: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size())
+    return (token_embeddings * mask_expanded).sum(0) / mask_expanded.sum(0)
+
+
 class Service:
     def __init__(
         self,
@@ -25,15 +37,72 @@ class Service:
             configuration={"hnsw": {"space": metric, "ef_construction": 200}},
         )
 
-    @staticmethod
-    def mean_pooling(
-        token_embeddings: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size())
-        return (token_embeddings * mask_expanded).sum(0) / mask_expanded.sum(0)
+    def dircet_token_importance(
+        self,
+        document_tokens: list[list[str]],
+        document_attention_masks: list[torch.Tensor],  # TODO: type
+        document_token_embeddings: list,  # TODO: type
+        document_embeddings: list[list[float]],
+        query_tokens: list[str],
+        query_attention_mask: torch.Tensor,  # TODO: type
+        query_token_embeddings: list,  # TODO: type
+        query_embedding: list[float],
+        similarities: list[float],
+    ) -> list[TokenImportance]:
 
-    def dircet_token_importance():
-        pass
+        token_importance: list[TokenImportance] = list()
+
+        assert (
+            len(document_tokens)
+            == len(document_attention_masks)
+            == len(document_token_embeddings)
+            == len(document_token_embeddings)
+            == len(similarities)
+        )
+
+        for doc_tokens, doc_attn_mask, doc_token_embs, doc_embedding, full_sim in zip(
+            document_tokens,
+            document_attention_masks,
+            document_token_embeddings,
+            document_embeddings,
+            similarities,
+        ):
+
+            # Documents -> Query
+            document_contributions: dict[str, float] = dict()
+            for i, tok in enumerate(doc_tokens):
+                if tok in list(self.model.tokenizer.special_tokens_map.values()):
+                    continue  # Ignore Special Tokens
+
+                new_mask = doc_attn_mask.clone()
+                new_mask[i] = 0  # Mask Token
+
+                emb_sub = mean_pooling(
+                    doc_token_embs, new_mask
+                )  # Masked Document Embedding
+                sim_sub = util.cos_sim(emb_sub, query_embedding)  # Masked Similarity
+                document_contributions[tok] = sim_sub - full_sim  # Token Influence
+
+            # Query -> Documents
+            query_contributions: dict[str, float] = dict()
+            for i, tok in enumerate(query_tokens):
+                if tok in list(self.model.tokenizer.special_tokens_map.values()):
+                    continue  # Ignore Special Tokens
+
+                new_mask = query_attention_mask.clone()
+                new_mask[i] = 0  # Mask Token
+
+                emb_sub = mean_pooling(
+                    query_token_embeddings, new_mask
+                )  # Masked Query Embedding
+                sim_sub = util.cos_sim(emb_sub, doc_embedding)  # Masked Similarity
+                query_contributions[tok] = sim_sub - full_sim  # Token Influence
+
+            token_importance.append(
+                {"document": document_contributions, "query": query_contributions}
+            )
+
+        return token_importance
 
     def _unpack_search_results(self, search_results) -> list[SearchResult]:
         combined = list()
@@ -100,3 +169,16 @@ class Service:
                 .cpu()
             )
             document_token_embeddings.append(doc_token_embs)
+
+        # Direct Token Importance
+        token_importance = self.dircet_token_importance(
+            document_tokens,
+            document_attention_masks,
+            document_token_embeddings,
+            doc_embeds,
+            query_tokens,
+            query_attention_mask,
+            query_token_embeddings,
+            q_emb,
+            full_similarities,
+        )
