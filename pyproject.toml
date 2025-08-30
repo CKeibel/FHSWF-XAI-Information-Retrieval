@@ -11,8 +11,12 @@ dependencies = [
     "torch (==2.2.*)",
     "sentence-transformers (>=5.1.0,<6.0.0)",
     "fastapi (>=0.116.1,<0.117.0)",
-    "chroma (>=0.2.0,<0.3.0)"
+    "numpy (<2)",
+    "chromadb (>=1.0.20,<2.0.0)"
 ]
+
+[tool.poetry]
+packages = [{ include = "app" }]
 
 
 [build-system]

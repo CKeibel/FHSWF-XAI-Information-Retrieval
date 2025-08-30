@@ -1,13 +1,16 @@
 from typing import TypedDict
 
+import chromadb
+import numpy as np
 import torch
-from chroma import ChromaClient
+from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer, util
 
 
 class SearchResult(TypedDict):
     document: str
     score: float
+    embedding: list[float]
 
 
 class TokenImportance(TypedDict):
@@ -31,7 +34,7 @@ class Service:
     ) -> None:
         self.model = SentenceTransformer(model_name)
         self.metric = metric
-        self.client = ChromaClient()
+        self.client = chromadb.Client()
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             configuration={"hnsw": {"space": metric, "ef_construction": 200}},
@@ -40,13 +43,13 @@ class Service:
     def dircet_token_importance(
         self,
         document_tokens: list[list[str]],
-        document_attention_masks: list[torch.Tensor],  # TODO: type
-        document_token_embeddings: list,  # TODO: type
-        document_embeddings: list[list[float]],
+        document_attention_masks: list[torch.Tensor],
+        document_token_embeddings: list[torch.Tensor],
+        document_embeddings: NDArray[np.float32],
         query_tokens: list[str],
-        query_attention_mask: torch.Tensor,  # TODO: type
-        query_token_embeddings: list,  # TODO: type
-        query_embedding: list[float],
+        query_attention_mask: torch.Tensor,
+        query_token_embeddings: torch.Tensor,
+        query_embedding: NDArray[np.float32],
         similarities: list[float],
     ) -> list[TokenImportance]:
 
@@ -107,9 +110,11 @@ class Service:
     def _unpack_search_results(self, search_results) -> list[SearchResult]:
         combined = list()
         combined = [
-            {"document": doc, "score": score}
-            for doc, score in zip(
-                search_results["documents"][0], search_results["distances"][0]
+            {"document": doc, "score": score, "embedding": vector}
+            for doc, score, vector in zip(
+                search_results["documents"][0],
+                search_results["distances"][0],
+                search_results["embeddings"][0],
             )
         ]
 
@@ -122,13 +127,16 @@ class Service:
 
     def explain_embeddings(self, query: str, top_k: int = 5):  # TODO: Return Type
         # Query Collection
-        q_emb = self.model.encode(query).tolist()
-        search_results = self.collection.query(q_emb, n_results=top_k)
+        q_emb = self.model.encode(query)
+        search_results = self.collection.query(
+            q_emb, n_results=top_k, include=["embeddings", "documents", "distances"]
+        )
         results = self._unpack_search_results(search_results)
 
         # Document Embeddings
         documents = [r["document"] for r in results]
-        doc_embeds = self.model.encode(documents)
+        doc_embeds = [r["embedding"] for r in results]
+        doc_embeds = np.asarray(doc_embeds, dtype=np.float32)
 
         # Full Query to Documents Embeddings
         full_similarities = util.cos_sim(q_emb, doc_embeds).tolist()[0]
@@ -182,3 +190,5 @@ class Service:
             q_emb,
             full_similarities,
         )
+
+        return token_importance
